@@ -1,3 +1,4 @@
+use chrono::prelude::*;
 use std::ffi::CString;
 use std::mem::MaybeUninit;
 use std::ops::Drop;
@@ -59,18 +60,45 @@ impl Point {
     }
 }
 
+struct ScreenData {
+    width: i32,
+    height: i32,
+    rmask: u32,
+    gmask: u32,
+    bmask: u32,
+}
+
+impl ScreenData {
+    pub fn new(width: i32, height: i32, rmask: u32, gmask: u32, bmask: u32) -> Self {
+        Self {
+            width,
+            height,
+            rmask,
+            gmask,
+            bmask,
+        }
+    }
+}
+
 struct RenderWindow {
     display: *mut _XDisplay,
     window: u64,
     graphics_context: *mut _XGC,
+    screen_data: ScreenData,
 }
 
 impl RenderWindow {
-    pub fn new(display: *mut _XDisplay, window: u64, graphics_context: *mut _XGC) -> Self {
+    pub fn new(
+        display: *mut _XDisplay,
+        window: u64,
+        graphics_context: *mut _XGC,
+        screen_data: ScreenData,
+    ) -> Self {
         Self {
             display,
             window,
             graphics_context,
+            screen_data,
         }
     }
 }
@@ -147,6 +175,14 @@ fn init_x() -> RenderWindow {
         {
             panic!("No Visual Info with 32bit true color!");
         }
+
+        let screen_data = ScreenData::new(
+            width as i32,
+            height as i32,
+            visual_info.red_mask as u32,
+            visual_info.green_mask as u32,
+            visual_info.blue_mask as u32,
+        );
 
         let window = XCreateWindow(
             display,
@@ -239,7 +275,7 @@ fn init_x() -> RenderWindow {
 
         XSetInputFocus(display, window, RevertToNone, CurrentTime);
 
-        RenderWindow::new(display, window, graphics_context)
+        RenderWindow::new(display, window, graphics_context, screen_data)
     }
 }
 
@@ -291,7 +327,24 @@ fn handle_events(render_window: &mut RenderWindow) {
                 x11::xlib::KeyPress => {
                     if event.key.keycode == 9 {
                         //X11 ESC keycode
-                        println!("Exiting");
+                        return;
+                    } else if event.key.keycode == 36 {
+                        //X11 Enter keycode
+                        match selection {
+                            SelectionState::NotCreated => {
+                                save_selection(
+                                    render_window,
+                                    Point::new(0, 0),
+                                    Point::new(
+                                        render_window.screen_data.width,
+                                        render_window.screen_data.height,
+                                    ),
+                                );
+                            }
+                            _ => {
+                                save_selection(render_window, point_one, point_two);
+                            }
+                        }
                         return;
                     }
                 }
@@ -321,4 +374,64 @@ fn draw_selection(render_window: &mut RenderWindow, point_one: Point, point_two:
             height as u32,
         );
     };
+}
+
+fn save_selection(render_window: &mut RenderWindow, point_one: Point, point_two: Point) {
+    let min = point_one.min(&point_two);
+    let max = point_one.max(&point_two);
+
+    let width = max.x - min.x;
+    let height = max.y - min.y;
+
+    let rmask: u32 = render_window.screen_data.rmask;
+    let gmask: u32 = render_window.screen_data.gmask;
+    let bmask: u32 = render_window.screen_data.bmask;
+
+    let args: Vec<String> = std::env::args().collect();
+
+    let filepath = format!(
+        "{}",
+        Local::now().format(args.get(1).unwrap_or(&"sleek-%Y-%m-%d:%H:%M:%S".to_owned()))
+    )
+    .to_owned()
+    .trim()
+    .replace(".png", "")
+        + ".png";
+
+    unsafe {
+        XClearWindow(render_window.display, render_window.window);
+
+        let image = XGetImage(
+            render_window.display,
+            render_window.window,
+            min.x,
+            min.y,
+            width as u32,
+            height as u32,
+            XAllPlanes(),
+            ZPixmap,
+        );
+
+        let image: Vec<u8> =
+            std::slice::from_raw_parts::<u32>((*image).data as *const _, (width * height) as usize)
+                .iter()
+                .map(|p| {
+                    [
+                        ((*p & rmask) >> (rmask.trailing_zeros())) as u8,
+                        ((*p & gmask) >> (gmask.trailing_zeros())) as u8,
+                        ((*p & bmask) >> (bmask.trailing_zeros())) as u8,
+                    ]
+                })
+                .flatten()
+                .collect();
+
+        image::save_buffer(
+            filepath,
+            &image,
+            width as u32,
+            height as u32,
+            image::ColorType::Rgb8,
+        )
+        .unwrap();
+    }
 }
